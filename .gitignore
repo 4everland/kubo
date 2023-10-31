@@ -21,6 +21,7 @@ bin/tmp
 bin/gocovmerge
 bin/cover
 
+.idea
 
 vendor
 .tarball

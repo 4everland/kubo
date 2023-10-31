@@ -1,7 +1,13 @@
 package flatfs
 
 import (
+	"context"
 	"fmt"
+	"github.com/4everland/ipfs-top/third_party/dag"
+	"github.com/ipfs/boxo/blockstore"
+	"github.com/ipfs/boxo/datastore/dshelp"
+	"github.com/ipfs/go-cid"
+	ds "github.com/ipfs/go-datastore"
 	"path/filepath"
 
 	"github.com/ipfs/kubo/plugin"
@@ -40,6 +46,7 @@ type datastoreConfig struct {
 	path      string
 	shardFun  *flatfs.ShardIdV1
 	syncField bool
+	bs        blockstore.Blockstore
 }
 
 // BadgerdsDatastoreConfig returns a configuration stub for a badger datastore
@@ -68,6 +75,17 @@ func (*flatfsPlugin) DatastoreConfigParser() fsrepo.ConfigFromMap {
 		if !ok {
 			return nil, fmt.Errorf("'sync' field is missing or not boolean")
 		}
+
+		endpoint, ok := params["endpoint"].(string)
+		if !ok {
+			return nil, fmt.Errorf("'endpoint' field is missing or not string")
+		}
+
+		c.bs, err = dag.NewBlockStore(endpoint, "")
+		if err != nil {
+			return nil, fmt.Errorf("blockstore init err: %v", err)
+		}
+
 		return &c, nil
 	}
 }
@@ -85,6 +103,82 @@ func (c *datastoreConfig) Create(path string) (repo.Datastore, error) {
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(path, p)
 	}
+	fs, err := flatfs.CreateOrOpen(p, c.shardFun, c.syncField)
+	if err != nil {
+		return nil, err
+	}
 
-	return flatfs.CreateOrOpen(p, c.shardFun, c.syncField)
+	return &rpcDs{
+		bs:        c.bs,
+		Datastore: fs,
+	}, nil
+}
+
+type rpcDs struct {
+	bs blockstore.Blockstore
+	*flatfs.Datastore
+}
+
+func (d *rpcDs) Get(ctx context.Context, key ds.Key) (value []byte, err error) {
+	if value, err = d.get(ctx, key, cid.Raw); err == nil {
+		return
+	}
+
+	if value, err = d.get(ctx, key, cid.DagProtobuf); err == nil {
+		return
+	}
+
+	return d.Datastore.Get(ctx, key)
+}
+
+func (d *rpcDs) Has(ctx context.Context, key ds.Key) (exists bool, err error) {
+	if exists, _ = d.has(ctx, key, cid.Raw); exists {
+		return
+	}
+
+	if exists, _ = d.has(ctx, key, cid.DagProtobuf); exists {
+		return
+	}
+
+	return d.Datastore.Has(ctx, key)
+}
+
+func (d *rpcDs) GetSize(ctx context.Context, key ds.Key) (size int, err error) {
+	if size, err = d.getSize(ctx, key, cid.Raw); err == nil {
+		return
+	}
+
+	if size, err = d.getSize(ctx, key, cid.DagProtobuf); err == nil {
+		return
+	}
+
+	return d.Datastore.GetSize(ctx, key)
+}
+
+func (d *rpcDs) get(ctx context.Context, key ds.Key, codecType uint64) ([]byte, error) {
+	c, err := dshelp.DsKeyToCidV1(key, codecType)
+	if err != nil {
+		return nil, err
+	}
+	b, err := d.bs.Get(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	return b.RawData(), nil
+}
+
+func (d *rpcDs) has(ctx context.Context, key ds.Key, codecType uint64) (bool, error) {
+	c, err := dshelp.DsKeyToCidV1(key, codecType)
+	if err != nil {
+		return false, err
+	}
+	return d.bs.Has(ctx, c)
+}
+
+func (d *rpcDs) getSize(ctx context.Context, key ds.Key, codecType uint64) (int, error) {
+	c, err := dshelp.DsKeyToCidV1(key, codecType)
+	if err != nil {
+		return 0, err
+	}
+	return d.bs.GetSize(ctx, c)
 }
